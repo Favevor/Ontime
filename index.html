@@ -17,7 +17,7 @@
 
 <style>
   html, body { margin: 0; padding: 0; background: #F5F2F4; }
-  body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  body { padding-bottom: env(safe-area-inset-bottom); }
   #lockscreen {
     position: fixed; inset: 0; z-index: 999; display: none;
     background: linear-gradient(155deg, #7B5C82, #563E5C);
@@ -35,6 +35,14 @@
 <body>
 <div id="lockscreen"><h2>On Time is locked</h2><button id="unlock">Unlock</button></div>
 <script>
+/* ------------------------------------------------------------------
+   On Time — native bridge
+
+   Everything here degrades gracefully. Running in a plain browser,
+   isNative() is false and the app keeps using the .ics export path.
+   Inside Capacitor, real scheduled notifications take over.
+   ------------------------------------------------------------------ */
+
 /* ------------------------------------------------------------------
    On Time — native bridge
 
@@ -113,7 +121,7 @@ window.OT = (function () {
   /* Rebuilds the entire schedule from scratch. Called on any change to
      accounts, reminder settings, reminder hour, or paid status. Cheaper
      and far less bug-prone than trying to patch individual entries. */
-  async function reschedule(accounts, remindHour, paidThisCycle) {
+  async function reschedule(accounts, remindHour, paidThisCycle, ladder) {
     var LN = plugin('LocalNotifications');
     if (!LN) return { scheduled: 0, native: false };
 
@@ -127,7 +135,10 @@ window.OT = (function () {
     });
     if (!active.length) return { scheduled: 0, native: true };
 
-    var monthsEach = Math.max(1, Math.floor(IOS_PENDING_CAP / active.length));
+    // Pro schedules up to three alerts per bill per month, so the pending
+    // budget has to be divided by that too or iOS silently drops the tail.
+    var perBill = ladder ? 3 : 1;
+    var monthsEach = Math.max(1, Math.floor(IOS_PENDING_CAP / (active.length * perBill)));
     if (monthsEach > 12) monthsEach = 12;
 
     var now = new Date();
@@ -160,6 +171,39 @@ window.OT = (function () {
           extra: { accountId: a.id, url: a.url || '' },
           actionTypeId: 'BILL_ACTIONS'
         });
+
+        /* Pro reminder ladder: a second alert on the morning it is due,
+           and an overdue chaser the day after. Free gets the single
+           advance warning above, which is enough not to miss a payment. */
+        if (ladder && lead > 0) {
+          var dayOf = new Date(due);
+          dayOf.setHours(remindHour, 0, 0, 0);
+          if (dayOf > now) {
+            list.push({
+              id: notifId(a.id, k) + 2000000,
+              title: 'Due today: ' + a.name,
+              body: amount + ' is due today.',
+              schedule: { at: dayOf, allowWhileIdle: true },
+              sound: 'default',
+              extra: { accountId: a.id, url: a.url || '' },
+              actionTypeId: 'BILL_ACTIONS'
+            });
+          }
+          var late = new Date(due);
+          late.setDate(late.getDate() + 1);
+          late.setHours(remindHour, 0, 0, 0);
+          if (late > now && !a.autopay) {
+            list.push({
+              id: notifId(a.id, k) + 4000000,
+              title: a.name + ' is overdue',
+              body: amount + ' was due yesterday. Late fees usually start now.',
+              schedule: { at: late, allowWhileIdle: true },
+              sound: 'default',
+              extra: { accountId: a.id, url: a.url || '' },
+              actionTypeId: 'BILL_ACTIONS'
+            });
+          }
+        }
       }
     });
 
@@ -274,7 +318,6 @@ window.OT = (function () {
     tap: tap, styleStatusBar: styleStatusBar, share: share
   };
 })();
-
 </script>
 <div id="root"><div class="boot">Getting your month together…</div></div>
 
@@ -322,7 +365,8 @@ window.OT = (function () {
     position: relative; overflow: hidden;
     background: linear-gradient(155deg, #7B5C82 0%, #6B4E71 45%, #563E5C 100%);
     color: #fff; border-radius: 0 0 30px 30px;
-    padding: 26px 20px 20px; margin-bottom: 4px;
+    padding: calc(26px + env(safe-area-inset-top, 0px)) 20px 20px;
+    margin-bottom: 4px;
   }
   .crest .engrave { position: absolute; inset: -40% -10% auto -10%; opacity: .5; pointer-events: none; }
   .crest .rule {
@@ -541,6 +585,235 @@ window.OT = (function () {
   .preview.bad { background: var(--rust-soft); color: var(--rust); }
   .preview b { display: block; margin-bottom: 3px; }
 
+  /* ---------- sync toggle ---------- */
+  .sync-row { display: flex; align-items: flex-start; gap: 13px; padding: 15px 15px 13px; }
+  .sync-main { flex: 1; }
+  .sync-main b { display: block; font-size: 14.5px; font-weight: 600; margin-bottom: 3px; }
+  .sync-main span { font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+  .switch {
+    flex: 0 0 50px; width: 50px; height: 30px; border-radius: 15px;
+    background: var(--line); position: relative; transition: background .18s ease;
+  }
+  .switch.on { background: var(--green); }
+  .switch i {
+    position: absolute; top: 3px; left: 3px; width: 24px; height: 24px;
+    border-radius: 50%; background: #fff; transition: transform .18s ease;
+    box-shadow: 0 1px 3px rgba(46,39,51,.28);
+  }
+  .switch.on i { transform: translateX(20px); }
+  .sync-state {
+    padding: 0 15px 14px; font-size: 12.5px; color: var(--green);
+  }
+  .sync-state.off { color: var(--muted); }
+  .choice { margin: 0 15px 15px; padding: 14px; border-radius: 14px; background: var(--gold-soft); }
+  .choice b { display: block; font-size: 14px; color: var(--gold); margin-bottom: 5px; }
+  .choice p { font-size: 12.5px; color: var(--gold); line-height: 1.55; margin-bottom: 12px; }
+  .choice .data-btns { padding: 0; }
+
+  /* ---------- account details vault ---------- */
+  .vault-gate { text-align: center; padding: 24px 6px 10px; }
+  .vault-gate .lock-ic { margin-bottom: 14px; }
+  .vault-gate p { font-size: 13.5px; color: var(--muted); line-height: 1.6; margin-bottom: 18px; }
+  .vault-warn {
+    background: var(--gold-soft); color: var(--gold); border-radius: 12px;
+    padding: 12px 13px; font-size: 12.5px; line-height: 1.6; margin-bottom: 16px;
+  }
+  .vault-warn b { display: block; margin-bottom: 3px; }
+  .masked {
+    font-family: ui-monospace, Menlo, monospace; letter-spacing: .08em;
+    color: var(--muted); font-size: 13px;
+  }
+  .vault-note { font-size: 11.5px; color: var(--faint); line-height: 1.55; margin-top: 14px; }
+  .field textarea {
+    width: 100%; padding: 12px 13px; border: 1.5px solid var(--line);
+    border-radius: 12px; font: inherit; font-size: 14px; background: #fff;
+    color: var(--ink); min-height: 90px; resize: vertical;
+  }
+
+  /* ---------- year in review ---------- */
+  .yr-head { padding: 17px 16px 4px; display: flex; align-items: baseline; justify-content: space-between; }
+  .yr-big { font-size: 27px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; }
+  .yr-cap { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .yr-nav { display: flex; gap: 4px; }
+  .yr-nav button {
+    width: 30px; height: 30px; border-radius: 9px; border: 1.5px solid var(--line);
+    color: var(--soft-ink); font-size: 15px; line-height: 1;
+  }
+  .yr-nav button[disabled] { opacity: .3; }
+  .yr-split { display: flex; gap: 10px; padding: 14px 16px 4px; }
+  .yr-cell { flex: 1; background: var(--bg); border-radius: 13px; padding: 12px 13px; }
+  .yr-cell .v { font-size: 18px; font-weight: 680; letter-spacing: -0.02em; }
+  .yr-cell .k { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .yr-cell.warn .v { color: var(--rust); }
+  .yr-months { display: flex; align-items: flex-end; gap: 3px; height: 62px; padding: 18px 16px 0; }
+  .yr-months div { flex: 1; background: var(--plum-soft); border-radius: 3px 3px 0 0; min-height: 2px; }
+  .yr-months div.hi { background: var(--plum); }
+  .yr-mlabels { display: flex; gap: 3px; padding: 5px 16px 0; }
+  .yr-mlabels span { flex: 1; text-align: center; font-size: 9px; color: var(--faint); }
+  .yr-acct { display: flex; align-items: center; gap: 11px; padding: 11px 16px; border-top: 1px solid var(--line); }
+  .yr-acct .nm { flex: 1; font-size: 14px; }
+  .yr-acct .amt { font-weight: 620; }
+  .yr-bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .yr-bar i { display: block; height: 100%; border-radius: 2px; }
+  .yr-empty { padding: 26px 20px; text-align: center; color: var(--muted); font-size: 13.5px; }
+
+  /* ---------- cash flow calendar ---------- */
+  .cal-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 16px 10px; }
+  .cal-title { font-size: 15px; font-weight: 620; }
+  .cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); padding: 0 10px; }
+  .cal-dow span { text-align: center; font-size: 10.5px; color: var(--faint); padding-bottom: 5px; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; padding: 0 10px 12px; }
+  .cal-cell {
+    aspect-ratio: 1; border-radius: 10px; padding: 4px 2px 2px;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    font-size: 11.5px; color: var(--muted);
+  }
+  .cal-cell.blank { visibility: hidden; }
+  .cal-cell.has { background: var(--plum-soft); color: var(--plum); font-weight: 600; }
+  .cal-cell.heavy { background: var(--plum); color: #fff; }
+  .cal-cell.today { outline: 2px solid var(--gold); outline-offset: -2px; }
+  .cal-amt { font-size: 9px; margin-top: 2px; opacity: .85; line-height: 1.1; }
+  .cal-foot {
+    display: flex; justify-content: space-between; padding: 12px 16px;
+    background: #FBF9FB; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted);
+  }
+  .cal-foot b { color: var(--ink); font-weight: 650; }
+
+  /* ---------- accessibility ---------- */
+  /* Respect the reader's font size instead of forcing our own. */
+  @media (prefers-contrast: more) {
+    #root {
+      --muted: #4A4150;
+      --faint: #5C5364;
+      --line: #B8AEBC;
+    }
+    .due-when, .acct-sub, .hint, .op-b, .legal-lead { color: var(--soft-ink); }
+  }
+  /* Never rely on colour alone: urgent rows also carry a leading marker. */
+  .due-when.urgent::before { content: '\26A0\FE0E'; margin-right: 5px; }
+  #root :focus-visible { outline: 3px solid var(--plum); outline-offset: 2px; border-radius: 8px; }
+  .skip {
+    position: absolute; left: -9999px; top: 0; background: var(--plum); color: #fff;
+    padding: 10px 16px; border-radius: 0 0 10px 0; z-index: 200; font-size: 14px;
+  }
+  .skip:focus { left: 0; }
+  .sr {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* ---------- tablets and desktop ----------
+     Two columns once there is room, so an iPad is not a stretched phone. */
+  @media (min-width: 760px) {
+    #root { max-width: 1000px; padding-bottom: 60px; }
+    .crest { border-radius: 0 0 40px 40px; padding-left: 34px; padding-right: 34px; }
+    .crest h1 { font-size: 32px; }
+    .glance { gap: 14px; }
+    .g-card .v { font-size: 23px; }
+    .cols {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 0 22px; align-items: start; padding: 0 14px;
+    }
+    .cols .sec { padding-left: 6px; padding-right: 6px; }
+    .sec-head h2 { font-size: 19px; }
+    .cal-cell { font-size: 13px; }
+    .cal-amt { font-size: 10.5px; }
+    .sheet { align-items: center; }
+    .sheet-in { border-radius: 22px; max-width: 560px; max-height: 86vh; }
+    .fab-wrap { max-width: 420px; margin: 0 auto; }
+  }
+  @media (min-width: 1100px) {
+    .cols { grid-template-columns: 1.1fr 1fr; }
+  }
+
+  /* ---------- trial + teaser ---------- */
+  .trial {
+    margin: 14px 20px 0; padding: 11px 14px; border-radius: 13px;
+    background: var(--gold-soft); color: var(--gold);
+    font-size: 12.5px; display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .trial b { font-weight: 700; }
+  .trial button { font-size: 12.5px; font-weight: 600; color: var(--gold); text-decoration: underline; }
+  .teaser { padding: 20px 18px 18px; }
+  .teaser-lead { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .teaser-big {
+    font-size: 30px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.15;
+    color: var(--rust);
+  }
+  .teaser-sub { font-size: 13.5px; color: var(--soft-ink); margin-top: 6px; line-height: 1.55; }
+  .teaser-win {
+    margin-top: 16px; padding: 14px; border-radius: 14px;
+    background: var(--green-soft);
+  }
+  .teaser-win b { display: block; font-size: 15px; color: var(--green); margin-bottom: 3px; }
+  .teaser-win span { font-size: 13px; color: var(--green); line-height: 1.55; }
+  .teaser-more {
+    margin-top: 14px; font-size: 13px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .teaser-more i {
+    flex: 1; height: 1px; background: var(--line); display: block;
+  }
+  .blur-row {
+    display: flex; justify-content: space-between; padding: 9px 0;
+    border-bottom: 1px solid var(--line); font-size: 13.5px;
+  }
+  .blur-row span { color: var(--muted); filter: blur(3.5px); user-select: none; }
+  .blur-row b { color: var(--green); font-weight: 650; }
+  .locked-note {
+    font-size: 12px; color: var(--faint); margin-top: 12px; text-align: center;
+  }
+  .pro-lock { opacity: .5; pointer-events: none; }
+
+  /* ---------- pro tier ---------- */
+  .lock { padding: 20px 18px 22px; text-align: center; }
+  .lock-ic {
+    width: 42px; height: 42px; border-radius: 14px; margin: 0 auto 12px;
+    background: var(--plum-soft); color: var(--plum);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .lock h3 { font-size: 16px; margin-bottom: 6px; }
+  .lock p { font-size: 13.5px; color: var(--muted); line-height: 1.6; margin-bottom: 15px; }
+  .lock-btn {
+    background: var(--plum); color: #fff; border-radius: 13px;
+    padding: 12px 22px; font-size: 14.5px; font-weight: 600;
+  }
+  .pro-tag {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .05em;
+    background: var(--gold-soft); color: var(--gold);
+    padding: 2px 7px; border-radius: 6px; margin-left: 8px; vertical-align: 2px;
+  }
+  .pw-hero {
+    background: linear-gradient(155deg, #7B5C82, #563E5C); color: #fff;
+    margin: -10px -18px 18px; padding: 26px 20px 22px;
+    border-radius: 24px 24px 0 0; text-align: center; position: relative; overflow: hidden;
+  }
+  .pw-hero h3 { font-size: 21px; margin-bottom: 5px; position: relative; }
+  .pw-hero p { font-size: 13.5px; color: #E7DAE9; position: relative; }
+  .pw-list { margin-bottom: 18px; }
+  .pw-item { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .pw-item:last-child { border-bottom: none; }
+  .pw-check { flex: 0 0 20px; color: var(--green); font-weight: 700; }
+  .pw-item b { display: block; font-size: 14.5px; font-weight: 600; margin-bottom: 2px; }
+  .pw-item span { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .pw-price {
+    text-align: center; background: var(--bg); border-radius: 14px;
+    padding: 14px; margin-bottom: 16px;
+  }
+  .pw-price b { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+  .pw-price span { display: block; font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+  .pw-restore { text-align: center; margin-top: 14px; }
+  .pw-restore button { font-size: 13px; color: var(--muted); text-decoration: underline; }
+  .pw-fine { font-size: 11.5px; color: var(--faint); text-align: center; margin-top: 12px; line-height: 1.5; }
+  .conf-note { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .hist { margin-top: 4px; }
+  .hist-row {
+    display: flex; justify-content: space-between; font-size: 12.5px;
+    color: var(--muted); padding: 6px 0; border-top: 1px solid var(--line);
+  }
+  .hist-row b { color: var(--ink); font-weight: 600; }
+  .est { font-size: 12.5px; color: var(--plum); margin-top: 5px; }
+
   /* ---------- partial payments ---------- */
   .prog { height: 5px; background: var(--line); border-radius: 3px; margin-top: 7px; overflow: hidden; }
   .prog i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
@@ -597,16 +870,18 @@ window.OT = (function () {
   var KEY = 'ontime:v2';
   var state = {
     accounts: [], paid: {}, extra: 0, strategy: 'avalanche',
-    offer: null, remindHour: 9, notify: false, ledger: {}
+    offer: null, remindHour: 9, notify: false, ledger: {}, graves: {}, pro: false, cloud: false, installedAt: 0, sumYear: 0, calOffset: 0
   };
   var editing = null, flash = null, icsText = null;
   var dataPanel = null, pendingImport = null, dataText = null;
-  var paying = null;
+  var paying = null, paywallOpen = false, cloudPrompt = null;
 
   /* ---------- storage ---------- */
   function save() {
+    if (!cloudBusy) state.updatedAt = Date.now();
     try { OT.Prefs.set(KEY, JSON.stringify(state)); } catch (e) {}
     syncNative();
+    pushCloud();
   }
   async function load() {
     try {
@@ -627,7 +902,7 @@ window.OT = (function () {
       var paid = settledIds();
       try {
         await OT.pushWidgetData(state.accounts, paid);
-        if (state.notify) await OT.reschedule(state.accounts, state.remindHour, paid);
+        if (state.notify) await OT.reschedule(state.accounts, effHour(), paid, hasPro());
       } catch (e) {}
     }, 400);
   }
@@ -734,6 +1009,7 @@ window.OT = (function () {
   }
 
   function downloadICS() {
+    if (!hasPro()) { paywallOpen = true; render(); return; }
     var list = state.accounts.filter(function (a) { return a.remind !== -1; });
     if (!list.length) { flash = { t:'warn', m:'Every account has reminders switched off.' }; render(); return; }
     var text = buildICS(list);
@@ -761,7 +1037,7 @@ window.OT = (function () {
       if (ok) {
         await OT.registerActions();
         var paid = settledIds();
-        var r = await OT.reschedule(state.accounts, state.remindHour, paid);
+        var r = await OT.reschedule(state.accounts, effHour(), paid, hasPro());
         flash = { t:'ok', m: r.scheduled + ' reminders scheduled, covering the next ' +
           r.monthsEach + ' month' + (r.monthsEach===1?'':'s') + '. They fire whether or not the app is open.' };
       } else {
@@ -815,7 +1091,7 @@ window.OT = (function () {
       if (!extra.accountId) return;
       if (actionId === 'MARK_PAID') {
         var acc = state.accounts.filter(function (x) { return x.id === extra.accountId; })[0];
-        if (acc && !isSettled(acc)) recordPayment(acc.id, stillDue(acc));
+        if (acc && !isSettled(acc)) recordPayment(acc.id, stillDue(acc), 'from notification');
       }
     });
   }
@@ -827,13 +1103,21 @@ window.OT = (function () {
     var debts = state.accounts.filter(function (a) {
       return TYPES[a.type].amortize && a.balance > 0;
     }).map(function (a) {
-      return { id:a.id, name:a.name, bal:a.balance, apr:(a.apr||0)/100, min:a.payment||0, interest:0, months:null };
+      return { id:a.id, name:a.name, type:a.type, bal:a.balance, apr:(a.apr||0)/100,
+               escrow:a.escrow||0, grace:a.grace !== false,
+               min:a.payment||0, interest:0, months:null, acct:a };
     });
     if (!debts.length) return { series:[], debts:[], months:0, interest:0, stalled:[] };
 
-    var stalled = debts.filter(function(d){ return d.bal*d.apr/12 >= d.min; }).map(function(d){ return d.name; });
+    // "Stalled" now compares against the real accrual and the real
+    // principal portion, so an escrow-heavy mortgage is judged fairly.
+    var stalled = debts.filter(function (d) {
+      var pr = Math.max(0, d.min - d.escrow);
+      return periodInterest(d.acct, d.bal, 30) >= pr && pr >= 0;
+    }).map(function (d) { return d.name; });
     var series = [{ m:0, total: debts.reduce(function(s,d){return s+d.bal;},0) }];
     var freed = 0, ti = 0, m = 0;
+    var startNow = today(), startY = startNow.getFullYear(), startM = startNow.getMonth();
 
     while (debts.some(function(d){return d.bal>0.01;}) && m < 600) {
       m++;
@@ -842,26 +1126,41 @@ window.OT = (function () {
         return strategy === 'avalanche' ? b.apr-a.apr : a.bal-b.bal;
       })[0];
       var pool = extra + freed;
+      // Walk real calendar months so February genuinely costs less.
+      var cur = new Date(startY, startM + m - 1, 1);
+      var dim = daysInMonthOf(cur);
+
       live.forEach(function (d) {
-        var int = d.bal*d.apr/12;
+        var gross = d.min + (d === target ? pool : 0);
+        var principal = Math.max(0, gross - d.escrow);
+        var free = d.type === 'card' && d.grace && principal >= d.bal - 0.005;
+        var int = free ? 0 : periodInterest(d.acct, d.bal, dim);
         d.interest += int; ti += int; d.bal += int;
-        var pay = Math.min(d.min + (d===target?pool:0), d.bal);
+        var pay = Math.min(principal, d.bal);
         d.bal -= pay;
-        if (d.bal <= 0.01) { d.bal = 0; d.months = m; freed += d.min; }
+        if (d.bal <= 1) { d.bal = 0; d.months = m; freed += d.min; }
       });
       series.push({ m:m, total: debts.reduce(function(s,d){return s+d.bal;},0) });
     }
     return { series:series, debts:debts, months: m>=600?null:m, interest:ti, stalled:stalled };
   }
 
-  function payoffOne(bal, aprPct, pay, introM, introApr) {
-    var r = aprPct/100/12, ir = (introApr||0)/100/12, interest = 0, m = 0;
+  function payoffOne(bal, aprPct, pay, introM, introApr, opts) {
+    opts = opts || {};
+    var type = opts.type || 'personal', escrow = opts.escrow || 0;
+    var interest = 0, m = 0;
+    var principal = Math.max(0, pay - escrow);
     while (bal > 0.01 && m < 600) {
       m++;
-      var rate = (introM && m <= introM) ? ir : r;
-      var int = bal*rate; interest += int; bal += int;
-      var p = Math.min(pay, bal); bal -= p;
-      if (p <= int + 0.001 && bal > 0.01) return { months:null, interest:Infinity };
+      var effApr = (introM && m <= introM) ? (introApr || 0) : aprPct;
+      var int = periodInterest({ type: type, apr: effApr }, bal, 30.44);
+      interest += int; bal += int;
+      var p = Math.min(principal, bal); bal -= p;
+      if (p <= int + 0.001 && bal > 1) return { months:null, interest:Infinity };
+      // A payment rounded to cents leaves pennies behind on the last month.
+      // Lenders settle that in the final payment rather than billing again,
+      // so anything under a dollar counts as cleared.
+      if (bal <= 1) bal = 0;
     }
     return { months: m>=600?null:m, interest:interest };
   }
@@ -902,7 +1201,8 @@ window.OT = (function () {
     }
 
     debts.filter(function(a){ return a.type==='card' && a.apr>=12 && a.balance>=400; }).forEach(function (a) {
-      var now = payoffOne(a.balance,a.apr,a.payment), aft = payoffOne(a.balance,a.apr,a.payment,18,0);
+      var now = payoffOne(a.balance,a.apr,a.payment,0,0,{type:'card'}),
+          aft = payoffOne(a.balance,a.apr,a.payment,18,0,{type:'card'});
       var fee = a.balance*0.03, net = now.interest-aft.interest-fee;
       if (net > 50) out.push({
         save: net,
@@ -915,7 +1215,7 @@ window.OT = (function () {
 
     var floors = { auto:6.5, mortgage:6, personal:9, student:5.5 };
     debts.filter(function(a){ return floors[a.type] && a.apr > floors[a.type]+1; }).forEach(function (a) {
-      var now = payoffOne(a.balance,a.apr,a.payment);
+      var now = payoffOne(a.balance,a.apr,a.payment,0,0,{type:a.type,escrow:a.escrow});
       if (!now.months) return;
       var t = floors[a.type], np = levelPayment(a.balance,t,now.months), ni = np*now.months-a.balance;
       var cost = a.type==='mortgage' ? a.balance*0.02 : 0, net = now.interest-ni-cost;
@@ -946,8 +1246,10 @@ window.OT = (function () {
     if (!a || !a.balance || !a.payment) return null;
     var rate = parseFloat(o.rate); if (isNaN(rate)) return null;
     var fee = (parseFloat(o.fee)||0)/100*a.balance, intro = parseInt(o.months,10)||0;
-    var now = payoffOne(a.balance,a.apr,a.payment);
-    var aft = intro ? payoffOne(a.balance,a.apr,a.payment,intro,rate) : payoffOne(a.balance,rate,a.payment);
+    var o2 = { type: a.type, escrow: a.escrow };
+    var now = payoffOne(a.balance,a.apr,a.payment,0,0,o2);
+    var aft = intro ? payoffOne(a.balance,a.apr,a.payment,intro,rate,o2)
+                    : payoffOne(a.balance,rate,a.payment,0,0,o2);
     if (now.interest === Infinity) return null;
     return { name:a.name, fee:fee, nowInt:now.interest,
              newInt: aft.interest===Infinity?null:aft.interest,
@@ -981,11 +1283,843 @@ window.OT = (function () {
   }
 
 
+  /* ---------- year in review ----------
+     Built entirely from the ledger, so it costs nothing to keep and works
+     offline. Cycle keys are the month a payment was recorded against. */
+
+  /* ---------- account details ----------
+     Deliberately NOT a password manager. Account numbers, service lines and
+     notes — the things you hunt for when a bill goes wrong. Passwords belong
+     in the OS keychain, which is audited, autofills, and is not our problem
+     to get right. See the note shown to the user in vaultSheet().
+
+     Stored under its own key, kept out of backups, sharing and sync, so a
+     file you hand to someone else never carries it. On device it goes to
+     the iOS keychain when the plugin is present. */
+
+  var VKEY = 'ontime:vault:v1';
+  var vault = {}, vaultOpen = null, vaultUnlocked = false;
+
+  function vaultPlugin() {
+    return (window.Capacitor && window.Capacitor.Plugins)
+      ? window.Capacitor.Plugins.OnTimeVault : null;
+  }
+  function vaultSecure() { return !!vaultPlugin(); }
+
+  async function loadVault() {
+    try {
+      var p = vaultPlugin();
+      var raw = p ? (await p.get({ key: VKEY })).value : await OT.Prefs.get(VKEY);
+      if (raw) vault = JSON.parse(raw) || {};
+    } catch (e) { vault = {}; }
+  }
+  async function saveVault() {
+    var raw = JSON.stringify(vault);
+    try {
+      var p = vaultPlugin();
+      if (p) { await p.set({ key: VKEY, value: raw }); return; }
+      await OT.Prefs.set(VKEY, raw);
+    } catch (e) {}
+  }
+
+  function maskTail(v) {
+    if (!v) return '';
+    var s = String(v).replace(/\s+/g, '');
+    if (s.length <= 4) return '\u2022'.repeat(s.length);
+    return '\u2022'.repeat(Math.min(8, s.length - 4)) + s.slice(-4);
+  }
+
+  async function unlockVault() {
+    if (await OT.lockAvailable()) {
+      vaultUnlocked = await OT.unlock();
+      if (!vaultUnlocked) { flash = { t: 'warn', m: 'Not unlocked.' }; render(); return; }
+    } else {
+      vaultUnlocked = true;   // no biometrics on this device
+    }
+    render();
+  }
+
+  function vaultSheet() {
+    var a = state.accounts.filter(function (x) { return x.id === vaultOpen.id; })[0];
+    if (!a) return '';
+    var v = vault[a.id] || { num: '', phone: '', note: '' };
+
+    var h = '<div class="sheet" data-act="v-backdrop"><div class="sheet-in"><div class="grab"></div>' +
+      '<h3>' + esc(a.name) + ' details</h3>';
+
+    if (!vaultUnlocked) {
+      h += '<div class="vault-gate"><div class="lock-ic">' + icon('card') + '</div>' +
+        '<p>' + (v.num || v.phone || v.note
+          ? 'Stored: ' + (v.num ? 'account ' + maskTail(v.num) : 'notes') + '.'
+          : 'Nothing saved for this account yet.') +
+        '<br>Unlock to view or edit.</p>' +
+        '<button class="lock-btn" data-act="v-unlock">Unlock</button></div>' +
+        '<div class="s-acts"><button data-act="v-close">Close</button></div></div></div>';
+      return h;
+    }
+
+    h += '<div class="vault-warn"><b>Not a password manager</b>' +
+      'Do not put passwords, PINs or security answers here. Your phone already has ' +
+      'somewhere better for those \u2014 Settings, then Passwords \u2014 which autofills and ' +
+      'is built for it. This is for the details you hunt for when a bill goes wrong.</div>';
+
+    if (!vaultSecure()) {
+      h += '<div class="vault-warn"><b>This device stores it unencrypted</b>' +
+        'On the web version there is no keychain to use. Keep anything sensitive out ' +
+        'until you are running the installed app.</div>';
+    }
+
+    h += '<div class="field"><label for="v-num">Account number</label>' +
+      '<input id="v-num" type="text" value="' + esc(v.num || '') + '" placeholder="Optional">' +
+      '<div class="hint">Shown masked until you unlock.</div></div>' +
+
+      '<div class="field"><label for="v-phone">Customer service</label>' +
+      '<input id="v-phone" type="tel" value="' + esc(v.phone || '') + '" placeholder="Optional"></div>' +
+
+      '<div class="field"><label for="v-note">Notes</label>' +
+      '<textarea id="v-note" placeholder="Autopay set up 3/12. Rate expires June. Ask for retention if they raise it.">' +
+      esc(v.note || '') + '</textarea></div>' +
+
+      '<div class="s-acts"><button data-act="v-close">Cancel</button>' +
+      '<button class="save" data-act="v-save">Save</button></div>' +
+      '<div class="vault-note">Kept on this device only. It is left out of backups, out of ' +
+      'anything you share, and out of sync \u2014 so a file you hand to someone else never ' +
+      'carries it.</div>' +
+      '</div></div>';
+    return h;
+  }
+
+  function saveVaultSheet() {
+    var g = function (i) { var el = document.getElementById(i); return el ? el.value.trim() : ''; };
+    var rec = { num: g('v-num').slice(0, 60), phone: g('v-phone').slice(0, 40), note: g('v-note').slice(0, 2000) };
+    if (!rec.num && !rec.phone && !rec.note) delete vault[vaultOpen.id];
+    else vault[vaultOpen.id] = rec;
+    vaultOpen = null;
+    saveVault();
+    flash = { t: 'ok', m: 'Saved to this device.' };
+    render();
+  }
+
+  function yearStats(year) {
+    var paid = 0, interest = 0, count = 0;
+    var byAcct = {}, byMonth = [0,0,0,0,0,0,0,0,0,0,0,0];
+    Object.keys(state.ledger || {}).forEach(function (ck) {
+      var parts = ck.split('-');
+      var yy = parseInt(parts[0], 10), mm = parseInt(parts[1], 10);
+      if (yy !== year || !(mm >= 1 && mm <= 12)) return;
+      var cyc = state.ledger[ck];
+      Object.keys(cyc).forEach(function (id) {
+        var e = cyc[id];
+        if (!e || !(e.paid > 0)) return;
+        paid += e.paid;
+        interest += e.interest || 0;
+        count++;
+        byAcct[id] = (byAcct[id] || 0) + e.paid;
+        byMonth[mm - 1] += e.paid;
+      });
+    });
+    return { paid: paid, interest: interest, count: count, byAcct: byAcct, byMonth: byMonth };
+  }
+
+  function yearsWithData() {
+    var years = {};
+    Object.keys(state.ledger || {}).forEach(function (ck) {
+      var y = parseInt(ck.split('-')[0], 10);
+      if (y) years[y] = 1;
+    });
+    var list = Object.keys(years).map(Number).sort();
+    if (!list.length) list = [new Date().getFullYear()];
+    return list;
+  }
+
+  function yearSection() {
+    var years = yearsWithData();
+    var year = state.sumYear || new Date().getFullYear();
+    if (years.indexOf(year) === -1) year = years[years.length - 1];
+    var st = yearStats(year);
+    var i = years.indexOf(year);
+
+    var h = '<div class="sec"><div class="sec-head"><h2>' + year + ' in review</h2></div><div class="card">';
+
+    h += '<div class="yr-head"><div>' +
+      '<div class="yr-big num">' + money(st.paid) + '</div>' +
+      '<div class="yr-cap">paid across ' + st.count + ' bill' + (st.count === 1 ? '' : 's') + '</div></div>' +
+      '<div class="yr-nav">' +
+      '<button data-act="yr-prev"' + (i <= 0 ? ' disabled' : '') + ' aria-label="Previous year">\u2039</button>' +
+      '<button data-act="yr-next"' + (i >= years.length - 1 ? ' disabled' : '') + ' aria-label="Next year">\u203a</button>' +
+      '</div></div>';
+
+    if (!st.count) {
+      h += '<div class="yr-empty">Nothing recorded for ' + year +
+        ' yet. Bills you mark paid will show up here.</div></div></div>';
+      return h;
+    }
+
+    var toDebt = st.paid - st.interest;
+    h += '<div class="yr-split">' +
+      '<div class="yr-cell warn"><div class="v num">' + money(st.interest) + '</div>' +
+      '<div class="k">Went to interest</div></div>' +
+      '<div class="yr-cell"><div class="v num">' + money(toDebt) + '</div>' +
+      '<div class="k">Went to what you owe</div></div></div>';
+
+    var peak = Math.max.apply(null, st.byMonth) || 1;
+    h += '<div class="yr-months">' + st.byMonth.map(function (v) {
+      var pct = Math.round((v / peak) * 100);
+      return '<div class="' + (v === peak && v > 0 ? 'hi' : '') + '" style="height:' + Math.max(2, pct) + '%"></div>';
+    }).join('') + '</div>';
+    h += '<div class="yr-mlabels">' + MO.map(function (m) {
+      return '<span>' + m.charAt(0) + '</span>';
+    }).join('') + '</div>';
+
+    var rows = Object.keys(st.byAcct).map(function (id) {
+      var a = state.accounts.filter(function (x) { return x.id === id; })[0];
+      return { name: a ? a.name : 'Removed account', type: a ? a.type : 'other', total: st.byAcct[id] };
+    }).sort(function (p, q) { return q.total - p.total; }).slice(0, 6);
+    var top = rows.length ? rows[0].total : 1;
+
+    rows.forEach(function (r) {
+      var t = TYPES[r.type] || TYPES.other;
+      h += '<div class="yr-acct"><span class="acct-ic" style="background:' + t.s + ';color:' + t.c + '">' +
+        icon(r.type) + '</span><div style="flex:1"><div style="display:flex;justify-content:space-between">' +
+        '<span class="nm">' + esc(r.name) + '</span>' +
+        '<span class="amt num">' + money(r.total) + '</span></div>' +
+        '<div class="yr-bar"><i style="width:' + Math.round((r.total / top) * 100) + '%;background:' + t.c + '"></i></div>' +
+        '</div></div>';
+    });
+
+    h += '<button class="ghost-btn" style="margin-top:14px" data-act="csv">Export ' +
+      year + ' as a spreadsheet</button>';
+    h += '</div></div>';
+    return h;
+  }
+
+  /* Payment history as CSV — for taxes, or for proving you paid. */
+  function csvFor(year) {
+    var rows = [['Date', 'Account', 'Type', 'Amount', 'Confirmation']];
+    var seen = [];
+    Object.keys(state.ledger || {}).forEach(function (ck) {
+      if (parseInt(ck.split('-')[0], 10) !== year) return;
+      var cyc = state.ledger[ck];
+      Object.keys(cyc).forEach(function (id) {
+        var a = state.accounts.filter(function (x) { return x.id === id; })[0];
+        var e = cyc[id];
+        (e.log || []).forEach(function (p) {
+          seen.push({
+            at: p.at || 0,
+            row: [
+              new Date(p.at || 0).toISOString().slice(0, 10),
+              a ? a.name : 'Removed account',
+              a ? TYPES[a.type].label : '',
+              p.amount.toFixed(2),
+              p.ref || ''
+            ]
+          });
+        });
+      });
+    });
+    seen.sort(function (x, y) { return x.at - y.at; });
+    seen.forEach(function (r) { rows.push(r.row); });
+
+    return rows.map(function (r) {
+      return r.map(function (cell) {
+        var v = String(cell);
+        // Quote anything a spreadsheet would otherwise misread.
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      }).join(',');
+    }).join('\r\n');
+  }
+
+  function exportCSV() {
+    var year = state.sumYear || new Date().getFullYear();
+    var text = csvFor(year);
+    try {
+      var blob = new Blob([text], { type: 'text/csv' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'on-time-' + year + '.csv';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+      dataText = null;
+      flash = { t: 'ok', m: year + ' payments exported.' };
+    } catch (e) {
+      dataText = text;
+      flash = { t: 'warn', m: 'Download was blocked here. Copy the text below into a .csv file.' };
+    }
+    render();
+  }
+
+  /* ---------- cash flow calendar ----------
+     The month at a glance: which days cost money, and how much. */
+  function calendarSection() {
+    var off = state.calOffset || 0;
+    var base = new Date();
+    base.setDate(1);
+    base.setMonth(base.getMonth() + off);
+    var y = base.getFullYear(), mo = base.getMonth();
+    var dim = new Date(y, mo + 1, 0).getDate();
+    var startDow = new Date(y, mo, 1).getDay();
+    var t = today();
+    var isThisMonth = (t.getFullYear() === y && t.getMonth() === mo);
+
+    var byDay = {}, total = 0;
+    state.accounts.forEach(function (a) {
+      var d = Math.min(a.dueDay, dim);
+      byDay[d] = (byDay[d] || 0) + (a.payment || 0);
+      total += a.payment || 0;
+    });
+    var peak = 0;
+    Object.keys(byDay).forEach(function (k) { if (byDay[k] > peak) peak = byDay[k]; });
+
+    var h = '<div class="sec"><div class="sec-head"><h2>The month ahead</h2></div><div class="card">' +
+      '<div class="cal-head"><span class="cal-title">' + MO[mo] + ' ' + y + '</span>' +
+      '<div class="yr-nav">' +
+      '<button data-act="cal-prev" aria-label="Previous month">\u2039</button>' +
+      '<button data-act="cal-next" aria-label="Next month">\u203a</button>' +
+      '</div></div>' +
+      '<div class="cal-dow"><span>S</span><span>M</span><span>T</span><span>W</span>' +
+      '<span>T</span><span>F</span><span>S</span></div><div class="cal-grid">';
+
+    for (var b = 0; b < startDow; b++) h += '<div class="cal-cell blank"></div>';
+    for (var d = 1; d <= dim; d++) {
+      var amt = byDay[d] || 0;
+      var cls = 'cal-cell';
+      if (amt > 0) cls += (peak > 0 && amt >= peak * 0.6) ? ' has heavy' : ' has';
+      if (isThisMonth && d === t.getDate()) cls += ' today';
+      h += '<div class="' + cls + '"><span>' + d + '</span>' +
+        (amt > 0 ? '<span class="cal-amt num">' + money(amt) + '</span>' : '') + '</div>';
+    }
+    h += '</div><div class="cal-foot"><span>' + MO[mo] + ' total</span>' +
+      '<b class="num">' + money(total) + '</b></div></div></div>';
+    return h;
+  }
+
+  /* ---------- iCloud sync ----------
+     Every save stamps state.updatedAt. On launch, on resume, and when
+     another device writes, we compare stamps and take the newer copy.
+     Last write wins: simple, predictable, and adequate for one person
+     across their own devices. It is not a shared ledger. */
+
+  var cloudBusy = false;
+
+  function cloudPlugin() {
+    return (window.Capacitor && window.Capacitor.Plugins)
+      ? window.Capacitor.Plugins.OnTimeCloud : null;
+  }
+
+  function syncableState() {
+    return {
+      accounts: state.accounts, ledger: state.ledger, paid: state.paid,
+      extra: state.extra, strategy: state.strategy,
+      remindHour: state.remindHour, graves: state.graves || {},
+      updatedAt: state.updatedAt || 0
+    };
+  }
+
+  async function pushCloud() {
+    var c = cloudPlugin();
+    if (!c || cloudBusy || !state.cloud) return;
+    try { await c.set({ value: JSON.stringify(syncableState()) }); } catch (e) {}
+  }
+
+  /* Returns true if we adopted a newer copy from another device. */
+  async function pullCloud() {
+    var c = cloudPlugin();
+    if (!c || !state.cloud) return false;
+    try {
+      var r = await c.get();
+      if (!r || !r.value) return false;
+      var remote = JSON.parse(r.value);
+      if (!remote || !Array.isArray(remote.accounts)) return false;
+
+      var mine = state.updatedAt || 0;
+      var theirs = remote.updatedAt || 0;
+      if (theirs <= mine) return false;
+
+      // Route it through the same sanitiser the backup importer uses, so a
+      // corrupted cloud record cannot poison the app.
+      var clean = parseImport(JSON.stringify(remote));
+      if (clean.error) return false;
+
+      cloudBusy = true;
+      // Merge per record rather than replacing wholesale, so a change made
+      // on the other device is never silently thrown away.
+      mergeState({
+        accounts: clean.accounts, ledger: clean.ledger, graves: remote.graves || {},
+        extra: clean.extra, strategy: clean.strategy,
+        remindHour: clean.remindHour, updatedAt: theirs
+      });
+      state.updatedAt = Math.max(theirs, state.updatedAt || 0);
+      cloudBusy = false;
+
+      try { if (window.storage || OT) OT.Prefs.set(KEY, JSON.stringify(state)); } catch (e) {}
+      return true;
+    } catch (e) { cloudBusy = false; return false; }
+  }
+
+  /* Turning sync on is a deliberate act. If iCloud already holds data
+     from another device, we ask rather than guessing which copy wins. */
+  async function toggleCloud() {
+    if (!hasPro() && !state.cloud) { paywallOpen = true; render(); return; }
+    if (state.cloud) {
+      state.cloud = false;
+      flash = { t: 'ok', m: 'Sync off. Your data stays on this device only. Nothing was deleted from iCloud.' };
+      save(); render(); return;
+    }
+
+    var c = cloudPlugin();
+    if (!c) {
+      flash = { t: 'warn', m: 'Sync needs the installed app. The web version cannot reach iCloud.' };
+      render(); return;
+    }
+    try {
+      var avail = await c.isAvailable();
+      if (!avail || !avail.available) {
+        flash = { t: 'warn', m: 'No iCloud account is signed in on this device. Add one in Settings, then try again.' };
+        render(); return;
+      }
+      var r = await c.get();
+      var remote = null;
+      if (r && r.value) {
+        try { remote = JSON.parse(r.value); } catch (e) {}
+      }
+      if (remote && Array.isArray(remote.accounts) && remote.accounts.length &&
+          state.accounts.length && (remote.updatedAt || 0) !== (state.updatedAt || 0)) {
+        cloudPrompt = {
+          count: remote.accounts.length,
+          names: remote.accounts.slice(0, 3).map(function (a) { return a.name; }).join(', '),
+          when: remote.updatedAt ? new Date(remote.updatedAt) : null
+        };
+        render(); return;
+      }
+      state.cloud = true;
+      if (remote && Array.isArray(remote.accounts) && remote.accounts.length && !state.accounts.length) {
+        await pullCloud();
+      } else {
+        await pushCloud();
+      }
+      flash = { t: 'ok', m: 'Sync on. Your accounts will follow you to your other devices.' };
+      save(); render();
+    } catch (e) {
+      flash = { t: 'warn', m: 'Could not reach iCloud just now.' };
+      render();
+    }
+  }
+
+  async function resolveCloud(keep) {
+    state.cloud = true;
+    cloudPrompt = null;
+    if (keep === 'remote') {
+      state.updatedAt = 0;             // force the remote copy to win
+      await pullCloud();
+      flash = { t: 'ok', m: 'Combined. Everything from both devices is here.' };
+    } else {
+      state.updatedAt = Date.now();
+      await pushCloud();
+      flash = { t: 'ok', m: 'This device is now the copy everything syncs from. The other set was replaced.' };
+    }
+    save(); render();
+  }
+
+  function syncSection() {
+    var c = cloudPlugin();
+    var h = '<div class="sync-row"><div class="sync-main">' +
+      '<b>Sync across my devices' + (hasPro() ? '' : '<span class="pro-tag">PRO</span>') + '</b>' +
+      '<span>Off by default. When on, your accounts are kept in your own iCloud so your iPhone, iPad and Mac stay in step. ' +
+      'Apple holds it under your account \u2014 we never see it, and there is still no server of ours involved.</span></div>' +
+      '<button class="switch ' + (state.cloud ? 'on' : '') + '" data-act="cloud-toggle" ' +
+      'role="switch" aria-checked="' + (state.cloud ? 'true' : 'false') + '" aria-label="Sync across devices"><i></i></button></div>';
+
+    if (state.cloud) {
+      h += '<div class="sync-state">On. Last change ' +
+        (state.updatedAt ? new Date(state.updatedAt).toLocaleString() : 'just now') + '.</div>';
+    } else {
+      h += '<div class="sync-state off">' + (c
+        ? 'Off. Everything stays on this device.'
+        : 'Only available in the installed app.') + '</div>';
+    }
+
+    if (cloudPrompt) {
+      h += '<div class="choice"><b>iCloud already has ' + cloudPrompt.count + ' accounts</b>' +
+        '<p>' + esc(cloudPrompt.names) +
+        (cloudPrompt.count > 3 ? ' and others' : '') +
+        (cloudPrompt.when ? ', last changed ' + cloudPrompt.when.toLocaleDateString() : '') +
+        '. This device has ' + state.accounts.length +
+        '. Combining keeps everything from both, and every payment already ' +
+        'recorded on either side. Nothing is lost.</p>' +
+        '<div class="data-btns">' +
+        '<button data-act="cloud-keep-local">Keep only this device</button>' +
+        '<button class="primary" data-act="cloud-keep-remote">Combine them</button>' +
+        '</div></div>';
+    }
+    return h;
+  }
+
+  function bindCloud() {
+    var c = cloudPlugin();
+    if (!c || !c.addListener) return;
+    // The listener is always bound; pullCloud() itself refuses to act
+    // while sync is switched off.
+    try {
+      c.addListener('cloudChanged', function () {
+        pullCloud().then(function (changed) {
+          if (changed) {
+            flash = { t: 'ok', m: 'Updated from your other device.' };
+            render();
+          }
+        });
+      });
+    } catch (e) {}
+  }
+
+  /* ---------- pro tier ----------
+     A one-time unlock, not a subscription. Free covers bills, dates,
+     reminders and backup. Paid covers the projection engine. */
+
+  var PRO_PRODUCT = 'com.badman.ontime.pro';
+  var PRO_PRICE = '$14.99';
+
+  function isPro() { return !!state.pro; }
+
+  /* Fourteen days of everything, then the projection folds back to a
+     teaser built from their own numbers. Someone who has seen their real
+     debt-free date and lost it converts; someone who never saw it does not. */
+  /* Free gets a reminder that works: one alert, three days out, at 9am.
+     Pro gets control of it — custom timing per bill, a second nudge on the
+     day, an overdue chaser, and calendar export. Nobody misses a payment
+     because they did not pay us. */
+  var FREE_LEAD = 3, FREE_HOUR = 9;
+  function effLead(a) {
+    var lead = a.remind === undefined ? 3 : a.remind;
+    return hasPro() ? lead : (lead === -1 ? -1 : FREE_LEAD);
+  }
+  function effHour() { return hasPro() ? state.remindHour : FREE_HOUR; }
+
+  var TRIAL_DAYS = 14;
+  function trialLeft() {
+    if (!state.installedAt) return TRIAL_DAYS;
+    var used = Math.floor((Date.now() - state.installedAt) / 86400000);
+    return Math.max(0, TRIAL_DAYS - used);
+  }
+  function inTrial() { return !state.pro && trialLeft() > 0; }
+  function hasPro() { return state.pro || inTrial(); }
+
+  /* StoreKit lives behind a small native plugin. On the web there is no
+     purchase path, so the paywall explains that instead of failing. */
+  async function refreshPro() {
+    var p = (window.Capacitor && window.Capacitor.Plugins) ? window.Capacitor.Plugins.OnTimeStore : null;
+    if (!p) return;
+    try {
+      var r = await p.isPurchased({ productId: PRO_PRODUCT });
+      if (r && typeof r.purchased === 'boolean') { state.pro = r.purchased; save(); }
+    } catch (e) {}
+  }
+
+  async function buyPro() {
+    var p = (window.Capacitor && window.Capacitor.Plugins) ? window.Capacitor.Plugins.OnTimeStore : null;
+    if (!p) {
+      flash = { t: 'warn', m: 'Purchases only work in the installed app, not the web version.' };
+      paywallOpen = false; render(); return;
+    }
+    try {
+      var r = await p.purchase({ productId: PRO_PRODUCT });
+      if (r && r.purchased) {
+        state.pro = true; paywallOpen = false;
+        flash = { t: 'ok', m: 'Unlocked. Thank you.' };
+        save(); render();
+      } else {
+        flash = { t: 'warn', m: 'Purchase was not completed.' };
+        render();
+      }
+    } catch (e) {
+      flash = { t: 'warn', m: 'Something went wrong with the purchase. Nothing was charged.' };
+      render();
+    }
+  }
+
+  async function restorePro() {
+    var p = (window.Capacitor && window.Capacitor.Plugins) ? window.Capacitor.Plugins.OnTimeStore : null;
+    if (!p) { flash = { t: 'warn', m: 'Nothing to restore in the web version.' }; render(); return; }
+    try {
+      var r = await p.restore();
+      state.pro = !!(r && r.purchased);
+      flash = state.pro
+        ? { t: 'ok', m: 'Your purchase has been restored.' }
+        : { t: 'warn', m: 'No previous purchase found on this Apple ID.' };
+      paywallOpen = false; save(); render();
+    } catch (e) {
+      flash = { t: 'warn', m: 'Could not reach the store. Try again shortly.' };
+      render();
+    }
+  }
+
+  /* The honest version of a paywall: show what it found, not what it does. */
+  function teaser(p) {
+    var ops = opportunities();
+    var top = ops.filter(function (o) { return o.save > 0; })[0];
+    var h = '<div class="sec"><div class="sec-head"><h2>Where this ends</h2>' +
+      '<span class="note">' + trialLeft() + ' days left</span></div><div class="card"><div class="teaser">';
+
+    if (p.months === null) {
+      h += '<div class="teaser-lead">At your current payments</div>' +
+        '<div class="teaser-big">These never clear</div>' +
+        '<div class="teaser-sub">At least one payment is smaller than the interest it accrues, so that balance grows every month no matter how long you keep paying.</div>';
+    } else {
+      h += '<div class="teaser-lead">At your current payments you will hand over</div>' +
+        '<div class="teaser-big num">' + money(p.interest) + '</div>' +
+        '<div class="teaser-sub">in interest before you are clear' +
+        (p.months ? ', over the next ' + p.months + ' months' : '') + '.</div>';
+    }
+
+    if (top) {
+      h += '<div class="teaser-win"><b>' + esc(top.title) + '</b>' +
+        '<span>Would save you ' + money(top.save) + '.</span></div>';
+    }
+
+    var rest = ops.filter(function (o) { return o !== top; });
+    if (rest.length) {
+      h += '<div class="teaser-more"><i></i>' + rest.length + ' more found<i></i></div>';
+      rest.slice(0, 4).forEach(function (o) {
+        h += '<div class="blur-row"><span>' + esc(o.title) + '</span>' +
+          '<b class="num">' + (o.save > 0 ? money(o.save) : '\u2014') + '</b></div>';
+      });
+    }
+
+    h += '<div class="locked-note">Your payoff date, both payoff strategies compared, ' +
+      'and the offer checker are part of Pro.</div>' +
+      '<button class="lock-btn" style="width:100%;margin-top:14px" data-act="paywall">' +
+      'Unlock for ' + PRO_PRICE + ' \u2014 once, not monthly</button>' +
+      '</div></div></div>';
+    return h;
+  }
+
+  function lockedCard(title, blurb) {
+    return '<div class="sec"><div class="sec-head"><h2>' + title +
+      '<span class="pro-tag">PRO</span></h2></div><div class="card"><div class="lock">' +
+      '<div class="lock-ic">' + icon('personal') + '</div>' +
+      '<h3>' + title + '</h3><p>' + blurb + '</p>' +
+      '<button class="lock-btn" data-act="paywall">See what it does</button>' +
+      '</div></div></div>';
+  }
+
+  function paywall() {
+    return '<div class="sheet" data-act="pw-backdrop"><div class="sheet-in"><div class="grab"></div>' +
+      '<div class="pw-hero">' + rosette() +
+      '<h3>Know where this ends</h3>' +
+      '<p>One payment. No subscription, ever.</p></div>' +
+
+      '<div class="pw-list">' +
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Your payoff date</b>' +
+      '<span>Every debt simulated month by month, compounding the way your lender does. See the month you are clear and what the interest costs to get there.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Highest rate or smallest balance</b>' +
+      '<span>Compare both strategies and see the real dollar difference. Cleared payments roll into the next account automatically.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Ways to save, ranked by dollars</b>' +
+      '<span>What one more hundred a month buys you. Which cards would clear a transfer fee. Where a refinance is worth the paperwork.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Check a real offer</b>' +
+      '<span>Enter a lender\'s actual quote and see what it saves against what you pay now, fee included.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>The month at a glance</b>' +
+      '<span>A calendar showing which days cost money and how much, so a heavy week never catches you out.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Your year in review</b>' +
+      '<span>What you paid, how much of it went to interest, broken down by account. Exports to a spreadsheet for tax time.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Account details, locked</b>' +
+      '<span>Account numbers, service lines and notes behind Face ID, kept in the device keychain and out of every backup and export.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Reminders on your terms</b>' +
+      '<span>Your own lead time per bill, a nudge on the day, an overdue chaser, calendar export, and sync across your devices.</span></div></div>' +
+
+      '<div class="pw-item"><span class="pw-check">✓</span><div><b>Hand it to your partner</b>' +
+      '<span>Send your whole ledger to another device in one tap.</span></div></div>' +
+      '</div>' +
+
+      '<div class="pw-price"><b>' + PRO_PRICE + '</b><span>Paid once. Yours for good.</span></div>' +
+
+      '<div class="s-acts"><button data-act="pw-close">Not now</button>' +
+      '<button class="save" data-act="pw-buy">Unlock</button></div>' +
+      '<div class="pw-restore"><button data-act="pw-restore">Restore a previous purchase</button></div>' +
+      '<div class="pw-fine">Unlimited bills, payment tracking, a reminder for every bill, ' +
+      'and backup and restore stay free forever \u2014 including the warning if a payment ' +
+      'is too small to cover its own interest. Your data is always yours to export.</div>' +
+      '</div></div>';
+  }
+
+  /* ---------- payment history ----------
+     Every payment is kept with its date and any confirmation number, so
+     there is proof of what was paid and when. */
+  function paymentsFor(id) {
+    var out = [];
+    Object.keys(state.ledger || {}).forEach(function (ck) {
+      var e = state.ledger[ck][id];
+      if (e && e.log) e.log.forEach(function (p) { out.push(p); });
+    });
+    return out.sort(function (a, b) { return (b.at || 0) - (a.at || 0); });
+  }
+
+  /* For bills that move around — power, water, gas — the last few
+     payments are a better starting figure than the scheduled amount. */
+  function estimateFor(a) {
+    if (TYPES[a.type].amortize) return null;
+    var log = paymentsFor(a.id);
+    if (log.length < 2) return null;
+    var recent = log.slice(0, 4);
+    var avg = recent.reduce(function (s, p) { return s + p.amount; }, 0) / recent.length;
+    if (Math.abs(avg - (a.payment || 0)) < 1) return null;
+    return avg;
+  }
+
   /* ---------- payments ledger ----------
      state.ledger[cycle][accountId] = { paid: <total paid this cycle>,
                                         interest: <interest applied once> }
      Storing the interest we charged makes an undo exact rather than
      approximate. */
+
+  /* ---------- interest model ----------
+     Three things every competitor gets wrong, and the reason this app's
+     numbers can match a real statement:
+
+     1. GRACE PERIODS. A card paid in full charges nothing. Charging a
+        month of interest to someone who clears their balance is simply
+        wrong, and it quietly inflates every total downstream.
+     2. ESCROW. A mortgage payment is principal, interest, taxes and
+        insurance. Only the first two touch the balance. Subtracting the
+        whole payment from principal makes payoff look years early.
+     3. ACTUAL DAYS. Card and auto interest accrues daily. February costs
+        less than January. Dividing by 12 never matches the statement. */
+
+  function daysInMonthOf(d) {
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  }
+
+  /* Interest for one cycle. `days` only matters for daily-accrual types. */
+  function periodInterest(a, balance, days) {
+    var apr = (a.apr || 0) / 100;
+    if (!(apr > 0) || !(balance > 0)) return 0;
+    switch (a.type) {
+      case 'card':
+      case 'auto':
+      case 'personal':
+        // Daily periodic rate, the way the issuer actually computes it.
+        return balance * (apr / 365) * (days || 30);
+      default:
+        // Mortgages and student loans are quoted and posted monthly.
+        return balance * apr / 12;
+    }
+  }
+
+  /* Escrow rides along with a mortgage payment but never reduces the loan. */
+  function principalOf(a, payment) {
+    return Math.max(0, payment - (a.escrow || 0));
+  }
+
+  /* Does this account get a grace period, and has it been kept? */
+  function graceApplies(a, payment, balance, prevCleared) {
+    if (a.type !== 'card') return false;
+    if (a.grace === false) return false;
+    // Grace survives only if the last statement was cleared AND this one is too.
+    return prevCleared !== false && payment >= balance - 0.005;
+  }
+
+  /* Was the previous cycle cleared to zero? Unknown counts as yes, so a
+     new user who pays in full is not charged interest on day one. */
+  function prevCleared(id) {
+    var t = today();
+    var prev = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+    var key = prev.getFullYear() + '-' + (prev.getMonth() + 1);
+    var e = (state.ledger[key] || {})[id];
+    if (!e) return true;
+    return e.cleared !== false;
+  }
+
+  /* ---------- record-level merge ----------
+     Whole-state last-write-wins is fine for one person across their own
+     devices and quietly destructive for two people. This merges instead:
+
+       accounts  -> per record, newest edit wins; a deletion is a tombstone
+                    so it does not resurrect from the other device
+       ledger    -> payments are append-only facts, so union by id and
+                    never drop one
+       settings  -> newest wins, they are cheap to lose
+
+     Every account carries `at` (last edited) and deletions leave an entry
+     in `graves`. Old saves without stamps are treated as older than
+     anything stamped, which is the safe direction. */
+
+  function stampAccount(a) { a.at = Date.now(); return a; }
+
+  function mergeAccounts(mine, theirs, myGraves, theirGraves) {
+    var graves = Object.assign({}, myGraves || {}, theirGraves || {});
+    var byId = {};
+    (mine || []).forEach(function (a) { byId[a.id] = a; });
+    (theirs || []).forEach(function (b) {
+      var a = byId[b.id];
+      if (!a) { byId[b.id] = b; return; }
+      byId[b.id] = (b.at || 0) > (a.at || 0) ? b : a;
+    });
+    return Object.keys(byId)
+      .filter(function (id) {
+        var died = graves[id] || 0;
+        var edited = byId[id].at || 0;
+        // An edit after the deletion means someone brought it back.
+        return !(died && died >= edited);
+      })
+      .map(function (id) { return byId[id]; });
+  }
+
+  /* Payments are facts. Two devices recording different ones must end up
+     with both, never one overwriting the other. */
+  function mergeLedger(mine, theirs) {
+    var out = {};
+    var cycles = {};
+    Object.keys(mine || {}).forEach(function (c) { cycles[c] = 1; });
+    Object.keys(theirs || {}).forEach(function (c) { cycles[c] = 1; });
+
+    Object.keys(cycles).forEach(function (c) {
+      var a = (mine || {})[c] || {}, b = (theirs || {})[c] || {};
+      var ids = {};
+      Object.keys(a).forEach(function (i) { ids[i] = 1; });
+      Object.keys(b).forEach(function (i) { ids[i] = 1; });
+      out[c] = {};
+
+      Object.keys(ids).forEach(function (id) {
+        var ea = a[id], eb = b[id];
+        if (!ea) { out[c][id] = eb; return; }
+        if (!eb) { out[c][id] = ea; return; }
+
+        // Union the payment logs by a stable signature.
+        var seen = {}, log = [];
+        (ea.log || []).concat(eb.log || []).forEach(function (p) {
+          var k = (p.at || 0) + '|' + p.amount + '|' + (p.ref || '');
+          if (seen[k]) return;
+          seen[k] = 1; log.push(p);
+        });
+        log.sort(function (x, y) { return (x.at || 0) - (y.at || 0); });
+
+        var paid = log.reduce(function (s, p) { return s + p.amount; }, 0);
+        // Interest is charged once per cycle, so take the larger rather
+        // than adding the two sides together.
+        out[c][id] = { paid: paid, interest: Math.max(ea.interest || 0, eb.interest || 0), log: log };
+      });
+    });
+    return out;
+  }
+
+  function mergeState(remote) {
+    var mine = { accounts: state.accounts, ledger: state.ledger, graves: state.graves || {} };
+    var merged = mergeAccounts(mine.accounts, remote.accounts, mine.graves, remote.graves);
+    state.accounts = merged;
+    state.ledger = mergeLedger(state.ledger, remote.ledger);
+    state.graves = Object.assign({}, mine.graves, remote.graves || {});
+    if ((remote.updatedAt || 0) > (state.updatedAt || 0)) {
+      state.extra = remote.extra;
+      state.strategy = remote.strategy;
+      state.remindHour = remote.remindHour;
+    }
+    migrate();
+  }
 
   function cycleLedger(ck) {
     ck = ck || ckey(today());
@@ -1009,21 +2143,30 @@ window.OT = (function () {
   /* Records a payment and moves the balance. Interest for the cycle is
      charged once, on the first payment, so two half payments cost the
      same as one whole one. */
-  function recordPayment(id, amount) {
+  function recordPayment(id, amount, confirmation) {
     var a = state.accounts.filter(function (x) { return x.id === id; })[0];
     if (!a || !(amount > 0)) return;
     var led = cycleLedger();
-    var e = led[id] || { paid: 0, interest: 0 };
+    var e = led[id] || { paid: 0, interest: 0, log: [] };
+    if (!e.log) e.log = [];
 
     if (TYPES[a.type].amortize && a.balance > 0) {
       if (e.paid === 0) {
-        var int = a.balance * (a.apr || 0) / 100 / 12;
+        var free = graceApplies(a, amount, a.balance, prevCleared(a.id));
+        var int = free ? 0 : periodInterest(a, a.balance, daysInMonthOf(today()));
         e.interest = int;
+        e.graced = free;
         a.balance += int;
       }
-      a.balance = Math.max(0, a.balance - amount);
+      a.balance = Math.max(0, a.balance - principalOf(a, amount));
     }
+    e.cleared = (a.balance <= 0.005);
     e.paid += amount;
+    e.log.push({
+      amount: amount,
+      at: Date.now(),
+      ref: (confirmation || '').toString().slice(0, 40)
+    });
     led[id] = e;
     save(); render();
   }
@@ -1045,6 +2188,8 @@ window.OT = (function () {
     if (!a) return '';
     var sched = a.payment || 0, already = paidFor(a.id), left = stillDue(a);
     var amortize = TYPES[a.type].amortize;
+    var est = estimateFor(a);
+    var log = paymentsFor(a.id).slice(0, 5);
 
     return '<div class="sheet" data-act="pay-backdrop"><div class="sheet-in"><div class="grab"></div>' +
       '<h3>Record a payment</h3>' +
@@ -1056,7 +2201,13 @@ window.OT = (function () {
       '</div>' +
       '<div class="field"><label for="p-amt">How much did you pay?</label>' +
       '<input id="p-amt" type="number" step="0.01" min="0" value="' +
-      (left > 0 ? left.toFixed(2) : sched.toFixed(2)) + '"></div>' +
+      (est && already === 0 ? est.toFixed(2) : left > 0 ? left.toFixed(2) : sched.toFixed(2)) + '">' +
+      (est ? '<div class="est">Your last few came to about ' + money2(est) +
+             '. Filled in for you \u2014 change it if this one is different.</div>' : '') +
+      '</div>' +
+      '<div class="field"><label for="p-ref">Confirmation number</label>' +
+      '<input id="p-ref" type="text" placeholder="Optional">' +
+      '<div class="hint">Kept as proof of payment. Handy if a biller ever disputes one.</div></div>' +
       '<div class="quick">' +
       '<button data-act="pay-quick" data-v="' + (left > 0 ? left : sched) + '">' +
       (left > 0 && already > 0 ? 'The rest' : 'Full amount') + '</button>' +
@@ -1068,6 +2219,13 @@ window.OT = (function () {
       '<div class="s-acts"><button data-act="pay-cancel">Cancel</button>' +
       '<button class="save" data-act="pay-save">Record it</button></div>' +
       (already > 0 ? '<div class="undo-row"><button data-act="pay-undo">Undo this month\'s payments</button></div>' : '') +
+      (log.length ? '<div class="hist"><div class="hint" style="margin:18px 0 2px">Payment history</div>' +
+        log.map(function (p) {
+          var d = new Date(p.at);
+          return '<div class="hist-row"><span>' + MO[d.getMonth()] + ' ' + d.getDate() + ' ' +
+            d.getFullYear() + (p.ref ? ' \u00b7 ' + esc(p.ref) : '') +
+            '</span><b class="num">' + money2(p.amount) + '</b></div>';
+        }).join('') + '</div>' : '') +
       '</div></div>';
   }
 
@@ -1094,8 +2252,35 @@ window.OT = (function () {
     return JSON.stringify({
       app: 'On Time', version: 1, exportedAt: new Date().toISOString(),
       accounts: state.accounts, ledger: state.ledger, paid: state.paid,
-      extra: state.extra, strategy: state.strategy, remindHour: state.remindHour
+      extra: state.extra, strategy: state.strategy, remindHour: state.remindHour,
+      graves: state.graves || {}, pro: state.pro
     }, null, 2);
+  }
+
+  /* Hand the whole ledger to someone else — a partner, a second device.
+     It replaces what is on their side rather than merging, so the wording
+     has to be blunt about that. */
+  async function shareBackup() {
+    var text = exportPayload();
+    var stamp = new Date().toISOString().slice(0, 10);
+    var sent = false;
+    try {
+      sent = await OT.share(text, 'On Time backup ' + stamp);
+    } catch (e) {}
+    if (!sent && navigator.share) {
+      try {
+        await navigator.share({ title: 'On Time backup', text: text });
+        sent = true;
+      } catch (e) {}
+    }
+    if (sent) {
+      flash = { t: 'ok', m: 'Sent. Whoever opens it taps Restore from backup \u2014 it replaces what is on their device.' };
+      render(); return;
+    }
+    // No share sheet available: fall back to a file, then to plain text.
+    dataText = text;
+    flash = { t: 'warn', m: 'No share sheet here. Copy the text below and send it however you like.' };
+    doExport();
   }
 
   function doExport() {
@@ -1136,12 +2321,15 @@ window.OT = (function () {
       if (isNaN(lead) || lead < -1 || lead > 14) lead = 3;
       clean.push({
         id: String(a.id || ('a' + Date.now() + i)),
+        at: parseInt(a.at, 10) || 0,
         name: String(a.name).slice(0, 60),
         type: TYPES[a.type] ? a.type : 'other',
         balance: Math.max(0, parseFloat(a.balance) || 0),
         apr: Math.max(0, parseFloat(a.apr) || 0),
         payment: Math.max(0, parseFloat(a.payment) || 0),
         limit: Math.max(0, parseFloat(a.limit) || 0),
+        escrow: Math.max(0, parseFloat(a.escrow) || 0),
+        grace: a.grace !== false,
         dueDay: day, remind: lead, url: url, autopay: !!a.autopay
       });
     });
@@ -1152,6 +2340,7 @@ window.OT = (function () {
       accounts: clean, skipped: skipped,
       paid: (raw.paid && typeof raw.paid === 'object' && !Array.isArray(raw.paid)) ? raw.paid : {},
       ledger: (raw.ledger && typeof raw.ledger === 'object' && !Array.isArray(raw.ledger)) ? raw.ledger : {},
+      graves: (raw.graves && typeof raw.graves === 'object' && !Array.isArray(raw.graves)) ? raw.graves : {},
       extra: Math.max(0, parseFloat(raw.extra) || 0),
       strategy: raw.strategy === 'snowball' ? 'snowball' : 'avalanche',
       remindHour: (hour >= 0 && hour <= 23) ? hour : 9,
@@ -1183,7 +2372,13 @@ window.OT = (function () {
 
     h += '<div class="data-btns">' +
       (has ? '<button class="primary" data-act="export">Save a backup</button>' : '') +
-      '<button data-act="import-open">Restore from backup</button></div>';
+      '<button data-act="import-open">Restore from backup</button></div>' +
+      (has ? '<button class="ghost-btn" data-act="share">Send my accounts to someone else' +
+        (hasPro() ? '' : ' \u00b7 Pro') + '</button>' +
+        '<p class="data-lede" style="padding-top:0;font-size:12.5px;color:var(--faint)">' +
+        'For a partner or a second device. They open it and tap Restore \u2014 it replaces ' +
+        'whatever they had, so agree who keeps the master copy before you start swapping.</p>' : '') +
+      syncSection();
 
     if (dataText) h += '<textarea class="data-box" readonly>' + esc(dataText) + '</textarea>';
 
@@ -1250,8 +2445,10 @@ window.OT = (function () {
       'This app cannot access, hold, transfer or authorise money. It never asks for banking credentials, ' +
       'card numbers or account numbers, and you should never enter them here. A payment link opens your ' +
       'provider\'s own website in your browser \u2014 check the address bar before you sign in anywhere. ' +
-      'Everything you enter stays on this device, which also means there is no backup on our side: ' +
-      'if you lose the device or delete the app, the data goes with it.</p></details>' +
+      'Everything you enter stays on this device by default, which also means there is no backup on our side: ' +
+      'if you lose the device or delete the app, the data goes with it. Device sync is optional and off ' +
+      'until you switch it on; when you do, your accounts are stored in your own iCloud under your Apple ID, ' +
+      'governed by Apple\'s privacy terms rather than ours. We still never receive or store your data.</p></details>' +
 
       '<details><summary>No warranty</summary><p>' +
       'On Time is provided as is, without warranty of any kind. Calculations may contain errors. ' +
@@ -1271,11 +2468,12 @@ window.OT = (function () {
     var greet = h<12 ? 'Good morning' : h<18 ? 'Good afternoon' : 'Good evening';
     var html = '';
 
-    html += '<div class="crest">' + rosette() + '<div class="crest-in"><h1>' + greet + '</h1>';
+    html += '<a class="skip" href="#bills">Skip to your bills</a>' +
+      '<header class="crest" role="banner">' + rosette() + '<div class="crest-in"><h1>' + greet + '</h1>';
 
     if (!a.length) {
       html += '<p class="line">Let\'s get your bills somewhere you can see them.</p>' +
-        '</div><div class="rule"></div></div>' +
+        '</div><div class="rule"></div></header>' +
         '<div class="sec"><div class="card"><div class="blank">' +
         'Add your mortgage, car loan, cards and utilities. You will get a running month, reminders you can push to your calendar, and an honest payoff date.' +
         '</div></div></div><div class="fab-wrap"><button class="fab" data-act="add">Add your first account</button></div>' + dataSection() + legal();
@@ -1302,15 +2500,23 @@ window.OT = (function () {
       ? icon('utility') + overdue + ' need' + (overdue===1?'s':'') + ' attention now'
       : icon('other') + 'Nothing overdue') + '</div>';
 
+    if (inTrial() && state.accounts.length) {
+      html += '<div class="trial"><span>Pro features free for <b>' + trialLeft() +
+        ' more day' + (trialLeft() === 1 ? '' : 's') + '</b></span>' +
+        '<button data-act="paywall">Keep them</button></div>';
+    }
+
     html += '<div class="glance">' +
       '<div class="g-card lead"><div class="v num">' + money(left) + '</div><div class="k">Left this month</div></div>' +
       '<div class="g-card"><div class="v num">' + money(monthly) + '</div><div class="k">Monthly total</div></div>' +
       '<div class="g-card"><div class="v num">' + money(owed) + '</div><div class="k">Total owed</div></div>' +
-      '</div></div><div class="rule"></div></div>';
+      '</div></div><div class="rule"></div></header>';
 
     /* due list */
-    html += '<div class="sec"><div class="sec-head"><h2>Coming up</h2><span class="note">' +
-      soon.filter(function(u){return !u.paid;}).length + ' to go</span></div><div class="card">';
+    html += '<main id="bills" class="cols">';
+    html += '<div class="sec"><div class="sec-head"><h2 id="h-soon">Coming up</h2><span class="note">' +
+      soon.filter(function(u){return !u.paid;}).length + ' to go</span></div>' +
+      '<div class="card" role="list" aria-labelledby="h-soon">';
     if (!soon.length) {
       html += '<div class="blank">Nothing due in the next month.</div>';
     } else {
@@ -1318,10 +2524,12 @@ window.OT = (function () {
         var d = daysOut(u.date), T = TYPES[u.a.type];
         var urgent = !u.paid && d <= 2, warm = !u.paid && d <= 7;
         var when = u.paid ? 'Paid' : d===0 ? 'Due today' : d===1 ? 'Due tomorrow' : 'In ' + d + ' days';
-        var lead = u.a.remind === undefined ? 3 : u.a.remind;
+        var lead = effLead(u.a);
         var bg = u.paid ? 'var(--green-soft)' : urgent ? 'var(--rust-soft)' : T.s;
         var fg = u.paid ? 'var(--green)' : urgent ? 'var(--rust)' : T.c;
-        html += '<div class="due' + (u.paid ? ' settled' : '') + '">' +
+        html += '<div class="due' + (u.paid ? ' settled' : '') + '" role="listitem" ' +
+          'aria-label="' + esc(u.a.name) + ', ' + money(u.a.payment || 0) + ', ' +
+          (u.paid ? 'paid' : when.toLowerCase()) + '">' +
           '<div class="ic-wrap" style="background:' + bg + ';color:' + fg + '">' + icon(u.a.type) +
           '<span class="day num" style="color:' + fg + '">' + u.date.getDate() + '</span></div>' +
           '<div class="due-mid"><div class="due-name">' + esc(u.a.name) +
@@ -1330,52 +2538,67 @@ window.OT = (function () {
           (u.a.autopay ? ' · autopay' : lead === -1 ? '' : ' · reminder ' + (lead===0?'that day':lead+'d early')) + '</div>' +
           (u.part > 0 && !u.paid
             ? '<div class="due-part num">' + money(u.part) + ' of ' + money(u.a.payment||0) + ' paid</div>' +
-              '<div class="prog"><i style="width:' +
+              '<div class="prog" role="progressbar" aria-valuemin="0" aria-valuemax="' +
+              Math.round(u.a.payment || 0) + '" aria-valuenow="' + Math.round(u.part) +
+              '" aria-label="Paid so far"><i style="width:' +
               Math.min(100, (u.part / (u.a.payment||1)) * 100) + '%"></i></div>'
             : '') +
           '</div>' +
           '<div class="due-right"><div class="due-amt num' + (u.part > 0 && !u.paid ? ' part' : '') + '">' +
           money(u.paid ? (u.a.payment||0) : stillDue(u.a)) + '</div><div class="due-btns">' +
-          (u.a.url ? '<button class="pay" data-act="open" data-id="' + u.a.id + '">Pay</button>' : '') +
+          (u.a.url ? '<button class="pay" data-act="open" data-id="' + u.a.id +
+            '" aria-label="Open the payment page for ' + esc(u.a.name) + '">Pay</button>' : '') +
           '<button class="tick ' + (u.paid?'on':'') + '" data-act="pay-open" data-id="' + u.a.id +
-          '" aria-label="Record a payment">✓</button>' +
+          '" aria-label="Record a payment for ' + esc(u.a.name) + '"><span aria-hidden="true">✓</span></button>' +
           '</div></div></div>';
       });
       html += '<div class="strip"><span>Still to pay</span><b class="num">' + money(left) + '</b></div>';
     }
     html += '</div></div>';
 
+    if (hasPro()) html += calendarSection();
+
     /* reminders */
     html += '<div class="sec"><div class="sec-head"><h2>Reminders</h2></div><div class="card">' +
       '<p class="rem-lede">' + (OT.isNative()
         ? 'Reminders fire on your phone at the lead time you pick, whether or not the app is open. Change anything here and the schedule rebuilds itself.'
         : 'Push every bill into your phone\'s calendar as a repeating event with an alarm. Set once, and it fires whether or not this app is open.') + '</p>' +
-      '<div class="rem-row"><label>Remind me at<div class="sub">Time of day the alarm goes off</div></label>' +
-      '<select class="inline" id="r-hour">' +
+      (hasPro() ? '' :
+        '<div class="rem-row" style="background:#FBF9FB"><label>' +
+        '<b style="font-weight:600">One reminder per bill, three days early</b>' +
+        '<div class="sub">Pro adds a nudge on the day itself, an overdue chaser, ' +
+        'your own lead time per bill, and calendar export.</div></label>' +
+        '<button class="chipbtn" data-act="paywall">Upgrade</button></div>') +
+      '<div class="rem-row' + (hasPro() ? '' : ' pro-lock') + '"><label>Remind me at' +
+      '<div class="sub">Time of day the alarm goes off</div></label>' +
+      '<select class="inline" id="r-hour"' + (hasPro() ? '' : ' disabled') + '>' +
       [6,7,8,9,10,12,17,18,19,20].map(function(x){
         return '<option value="'+x+'"'+(state.remindHour===x?' selected':'')+'>'+
           (x%12===0?12:x%12)+':00 '+(x<12?'am':'pm')+'</option>';
       }).join('') + '</select></div>';
 
     a.forEach(function (x) {
-      var lead = x.remind === undefined ? 3 : x.remind;
-      html += '<div class="rem-row"><label>' + esc(x.name) +
+      var lead = effLead(x);
+      html += '<div class="rem-row' + (hasPro() ? '' : ' pro-lock') + '"><label>' + esc(x.name) +
         '<div class="sub num">' + money(x.payment||0) + ' on the ' + ord(x.dueDay) + '</div></label>' +
-        '<select class="inline lead" data-id="' + x.id + '">' +
+        '<select class="inline lead" data-id="' + x.id + '"' + (hasPro() ? '' : ' disabled') + '>' +
         '<option value="-1"' + (lead===-1?' selected':'') + '>Off</option>' +
         LEADS.map(function(n){ return '<option value="'+n+'"'+(lead===n?' selected':'')+'>'+leadLabel(n)+'</option>'; }).join('') +
         '</select></div>';
     });
 
-    if (flash) html += '<div class="toast ' + (flash.t==='warn'?'warn':'') + '">' + flash.m + '</div>';
+    if (flash) html += '<div class="toast ' + (flash.t==='warn'?'warn':'') +
+      '" role="status" aria-live="polite">' + flash.m + '</div>';
     if (icsText) html += '<textarea class="ics-out" readonly>' + esc(icsText) + '</textarea>';
 
     if (OT.isNative()) {
       html += '<button class="big-btn" data-act="notify">' +
         (state.notify ? 'Reminders are on — rebuild schedule' : 'Turn on reminders') + '</button>' +
-        '<button class="ghost-btn" data-act="ics">Also export to my calendar</button>';
+        '<button class="ghost-btn" data-act="ics">Also export to my calendar' +
+        (hasPro() ? '' : ' \u00b7 Pro') + '</button>';
     } else {
-      html += '<button class="big-btn" data-act="ics">Add all reminders to my calendar</button>' +
+      html += '<button class="big-btn" data-act="ics">Add all reminders to my calendar' +
+        (hasPro() ? '' : ' \u00b7 Pro') + '</button>' +
         '<button class="ghost-btn" data-act="notify">' +
         (state.notify ? 'In-app nudges are on' : 'Also nudge me while the app is open') + '</button>';
     }
@@ -1391,10 +2614,16 @@ window.OT = (function () {
         '<span class="acct-bal num">' + (t.amortize ? money(x.balance||0) : money(x.payment||0)+'/mo') + '</span></div>' +
         '<div class="acct-sub"><span class="tag" style="background:' + t.s + ';color:' + t.c + '">' + t.label + '</span>' +
         '<span class="num">' + money(x.payment||0) + ' on the ' + ord(x.dueDay) + '</span>' +
-        (t.amortize && x.apr ? '<span class="num"> · ' + x.apr + '%</span>' : '') + '</div>' +
-        (x.limit ? '<div class="bar"><i class="' + (pct>50?'high':'') + '" style="width:' + pct + '%;background:' + (pct>50?'var(--rust)':t.c) + '"></i></div>' : '') +
+        (t.amortize && x.apr ? '<span class="num"> · ' + x.apr + '%</span>' : '') +
+        (x.escrow ? '<span class="num"> \u00b7 ' + money(x.escrow) + ' escrow</span>' : '') + '</div>' +
+        (x.limit ? '<div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" ' +
+          'aria-valuenow="' + Math.round(pct) + '" aria-label="' + Math.round(pct) +
+          ' percent of the credit limit used"><i class="' + (pct>50?'high':'') + '" style="width:' + pct +
+          '%;background:' + (pct>50?'var(--rust)':t.c) + '"></i></div>' : '') +
         '<div class="row-acts">' +
         (x.url ? '<button class="chipbtn" data-act="open" data-id="' + x.id + '">Open payment page</button>' : '') +
+        '<button class="chipbtn" data-act="vault" data-id="' + x.id + '">Details' +
+        (hasPro() ? (vault[x.id] ? ' \u00b7 saved' : '') : ' \u00b7 Pro') + '</button>' +
         '<button class="chipbtn" data-act="edit" data-id="' + x.id + '">Edit</button>' +
         '<button class="chipbtn danger" data-act="del" data-id="' + x.id + '">Remove</button>' +
         '</div></div>';
@@ -1403,7 +2632,10 @@ window.OT = (function () {
 
     /* projection */
     var p = project();
-    if (p.debts.length) {
+    if (p.debts.length && !hasPro()) {
+      html += teaser(p);
+    }
+    if (p.debts.length && hasPro()) {
       html += '<div class="sec"><div class="sec-head"><h2>Where this ends</h2></div><div class="card"><div class="proj-top">';
       if (p.months === null) {
         html += '<div class="proj-big">Not at these payments</div><div class="proj-sub">Interest is outrunning at least one payment.</div>';
@@ -1435,7 +2667,7 @@ window.OT = (function () {
     }
 
     /* ways to save */
-    var ops = opportunities();
+    var ops = hasPro() ? opportunities() : [];
     if (ops.length) {
       html += '<div class="sec"><div class="sec-head"><h2>Ways to save</h2><span class="note">by the dollar</span></div><div class="card">';
       ops.forEach(function (o) {
@@ -1471,11 +2703,15 @@ window.OT = (function () {
     }
 
     html += '<div class="fab-wrap"><button class="fab" data-act="add">Add an account</button></div>';
+    if (hasPro()) html += yearSection();
     html += dataSection();
+    html += '</main>';
     html += legal();
 
     if (editing !== null) html += sheet();
     if (paying !== null) html += paySheet();
+    if (paywallOpen) html += paywall();
+    if (vaultOpen !== null) html += vaultSheet();
     root.innerHTML = html;
     wire();
   }
@@ -1483,7 +2719,8 @@ window.OT = (function () {
   /* ---------- sheet ---------- */
   function sheet() {
     var a = editing.id ? state.accounts.filter(function(x){return x.id===editing.id;})[0] : null;
-    a = a || { name:'', type:'card', balance:'', limit:'', apr:'', payment:'', dueDay:1, autopay:false, url:'', remind:3 };
+    a = a || { name:'', type:'card', balance:'', limit:'', apr:'', payment:'', dueDay:1,
+               autopay:false, url:'', remind:3, escrow:'', grace:true };
     var days = ''; for (var i=1;i<=31;i++) days += '<option value="'+i+'"'+(a.dueDay===i?' selected':'')+'>'+ord(i)+'</option>';
     var lead = a.remind === undefined ? 3 : a.remind;
 
@@ -1506,6 +2743,14 @@ window.OT = (function () {
       '<div class="field"><label for="f-url">Payment page</label>' +
       '<input id="f-url" type="url" value="' + esc(a.url||'') + '" placeholder="https://…">' +
       '<div class="hint">A link to where you pay it. Paste the address of your provider\'s login page — never a password.</div></div>' +
+      '<div class="field"><label for="f-escrow">Escrow in this payment</label>' +
+      '<input id="f-escrow" type="number" step="0.01" min="0" value="' + (a.escrow || '') + '">' +
+      '<div class="hint">Mortgages only. The taxes and insurance portion, which does not ' +
+      'reduce what you owe. Leaving this out makes payoff look years early.</div></div>' +
+      '<div class="field"><label><input type="checkbox" id="f-grace" style="width:auto;margin-right:8px"' +
+      (a.grace !== false ? ' checked' : '') + '>Interest-free if I pay in full</label>' +
+      '<div class="hint">Cards only. Standard on almost every card: clear the statement ' +
+      'and you are charged nothing.</div></div>' +
       '<div class="field"><label for="f-limit">Credit limit</label>' +
       '<input id="f-limit" type="number" step="1" min="0" value="' + (a.limit||'') + '"><div class="hint">Cards only.</div></div>' +
       '<div class="field"><label><input type="checkbox" id="f-auto" style="width:auto;margin-right:8px"' + (a.autopay?' checked':'') + '>This one is on autopay</label></div>' +
@@ -1527,6 +2772,8 @@ window.OT = (function () {
       payment: parseFloat(g('f-pay').value)||0,
       dueDay: parseInt(g('f-due').value,10)||1,
       limit: parseFloat(g('f-limit').value)||0,
+      escrow: parseFloat(g('f-escrow').value)||0,
+      grace: g('f-grace').checked,
       remind: parseInt(g('f-lead').value,10),
       url: url, autopay: g('f-auto').checked
     };
@@ -1537,7 +2784,7 @@ window.OT = (function () {
     root.querySelectorAll('[data-act]').forEach(function (el) {
       el.addEventListener('click', function (e) {
         var act = el.getAttribute('data-act'), id = el.getAttribute('data-id');
-        if (['ics', 'notify', 'export'].indexOf(act) === -1) flash = null;
+        if (['ics', 'notify', 'export', 'csv', 'share'].indexOf(act) === -1) flash = null;
 
         if (act === 'add') { OT.tap('Light'); editing = {}; render(); }
         else if (act === 'edit') { editing = { id:id }; render(); }
@@ -1545,11 +2792,18 @@ window.OT = (function () {
         else if (act === 'backdrop') { if (e.target === el) { editing = null; render(); } }
         else if (act === 'save') {
           var rec = readSheet(); if (!rec) return;
+          stampAccount(rec);
           var i = state.accounts.findIndex(function(x){return x.id===rec.id;});
           if (i>-1) state.accounts[i] = rec; else state.accounts.push(rec);
           editing = null; save(); render();
         }
-        else if (act === 'del') { state.accounts = state.accounts.filter(function(x){return x.id!==id;}); save(); render(); }
+        else if (act === 'del') {
+          if (!state.graves) state.graves = {};
+          state.graves[id] = Date.now();
+          state.accounts = state.accounts.filter(function(x){return x.id!==id;});
+          if (vault[id]) { delete vault[id]; saveVault(); }
+          save(); render();
+        }
         else if (act === 'pay-open') { OT.tap('Light'); paying = { id: id }; render(); }
         else if (act === 'pay-cancel') { paying = null; render(); }
         else if (act === 'pay-backdrop') { if (e.target === el) { paying = null; render(); } }
@@ -1562,9 +2816,19 @@ window.OT = (function () {
           var amt = parseFloat(f2 && f2.value) || 0;
           if (amt <= 0) { if (f2) f2.focus(); return; }
           OT.tap('Medium');
+          var refEl = document.getElementById('p-ref');
+          var ref = refEl ? refEl.value : '';
           var pid = paying.id; paying = null;
-          recordPayment(pid, amt);
+          recordPayment(pid, amt, ref);
         }
+        else if (act === 'cloud-toggle') { OT.tap('Light'); toggleCloud(); }
+        else if (act === 'cloud-keep-local') { resolveCloud('local'); }
+        else if (act === 'cloud-keep-remote') { resolveCloud('remote'); }
+        else if (act === 'paywall') { paywallOpen = true; render(); }
+        else if (act === 'pw-close') { paywallOpen = false; render(); }
+        else if (act === 'pw-backdrop') { if (e.target === el) { paywallOpen = false; render(); } }
+        else if (act === 'pw-buy') { buyPro(); }
+        else if (act === 'pw-restore') { restorePro(); }
         else if (act === 'pay-undo') {
           var uid = paying.id; paying = null;
           undoPayments(uid);
@@ -1572,6 +2836,28 @@ window.OT = (function () {
         else if (act === 'strat') { state.strategy = el.getAttribute('data-v'); save(); render(); }
         else if (act === 'ics') { downloadICS(); }
         else if (act === 'export') { doExport(); }
+        else if (act === 'share') {
+          if (!hasPro()) { paywallOpen = true; render(); return; }
+          shareBackup();
+        }
+        else if (act === 'vault') {
+          if (!hasPro()) { paywallOpen = true; render(); return; }
+          vaultOpen = { id: id }; vaultUnlocked = false; render();
+        }
+        else if (act === 'v-unlock') { unlockVault(); }
+        else if (act === 'v-close') { vaultOpen = null; render(); }
+        else if (act === 'v-backdrop') { if (e.target === el) { vaultOpen = null; render(); } }
+        else if (act === 'v-save') { saveVaultSheet(); }
+        else if (act === 'csv') { exportCSV(); }
+        else if (act === 'yr-prev' || act === 'yr-next') {
+          var ys = yearsWithData();
+          var cur = ys.indexOf(state.sumYear || new Date().getFullYear());
+          if (cur === -1) cur = ys.length - 1;
+          state.sumYear = ys[Math.min(ys.length - 1, Math.max(0, cur + (act === 'yr-next' ? 1 : -1)))];
+          render();
+        }
+        else if (act === 'cal-prev') { state.calOffset = (state.calOffset || 0) - 1; render(); }
+        else if (act === 'cal-next') { state.calOffset = (state.calOffset || 0) + 1; render(); }
         else if (act === 'import-open') { dataPanel = 'import'; pendingImport = null; render(); }
         else if (act === 'import-cancel') { dataPanel = null; pendingImport = null; render(); }
         else if (act === 'import-apply') { applyImport(); }
@@ -1634,6 +2920,8 @@ window.OT = (function () {
 
   async function boot() {
     await load();
+    await loadVault();
+    if (!state.installedAt) { state.installedAt = Date.now(); save(); }
     OT.styleStatusBar();
 
     if (OT.isNative() && state.lock && await OT.lockAvailable()) {
@@ -1647,6 +2935,9 @@ window.OT = (function () {
     }
 
     render();
+    refreshPro().then(render);
+    bindCloud();
+    pullCloud().then(function (changed) { if (changed) render(); });
     bindNotificationActions();
     syncNative();
     if (!OT.isNative()) { checkNudges(); setInterval(checkNudges, 300000); }
